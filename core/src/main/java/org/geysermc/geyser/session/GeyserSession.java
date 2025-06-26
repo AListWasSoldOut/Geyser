@@ -120,6 +120,7 @@ import org.geysermc.geyser.api.entity.type.player.GeyserPlayerEntity;
 import org.geysermc.geyser.api.event.bedrock.SessionDisconnectEvent;
 import org.geysermc.geyser.api.event.bedrock.SessionLoginEvent;
 import org.geysermc.geyser.api.network.RemoteServer;
+import org.geysermc.geyser.command.CommandRegistry;
 import org.geysermc.geyser.command.GeyserCommandSource;
 import org.geysermc.geyser.configuration.EmoteOffhandWorkaroundOption;
 import org.geysermc.geyser.configuration.GeyserConfiguration;
@@ -810,15 +811,9 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         sentSpawnPacket = true;
         syncEntityProperties();
 
-        if (GameProtocol.isPreCreativeInventoryRewrite(this.protocolVersion())) {
-            ItemComponentPacket componentPacket = new ItemComponentPacket();
-            componentPacket.getItems().addAll(itemMappings.getComponentItemData());
-            upstream.sendPacket(componentPacket);
-        } else {
-            ItemComponentPacket componentPacket = new ItemComponentPacket();
-            componentPacket.getItems().addAll(itemMappings.getItemDefinitions().values());
-            upstream.sendPacket(componentPacket);
-        }
+        ItemComponentPacket componentPacket = new ItemComponentPacket();
+        componentPacket.getItems().addAll(itemMappings.getItemDefinitions().values());
+        upstream.sendPacket(componentPacket);
 
         ChunkUtils.sendEmptyChunks(this, playerEntity.getPosition().toInt(), 0, false);
 
@@ -872,6 +867,10 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         gamerulePacket.getGameRules().add(new GameRuleData<>("spawnradius", 0));
         // Recipe unlocking
         gamerulePacket.getGameRules().add(new GameRuleData<>("recipesunlock", true));
+        // We disable the locator bar until we are certain that the server wants us to enable it
+        // See WaypointCache for details
+        gamerulePacket.getGameRules().add(new GameRuleData<>("locatorBar", false));
+        
         upstream.sendPacket(gamerulePacket);
     }
 
@@ -1516,8 +1515,37 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     /**
      * Sends a command to the Java server.
      */
-    public void sendCommand(String command) {
+    public void sendCommandPacket(String command) {
         sendDownstreamGamePacket(new ServerboundChatCommandSignedPacket(command, Instant.now().toEpochMilli(), 0L, Collections.emptyList(), 0, new BitSet(), (byte) 0));
+    }
+
+    /**
+     * Runs the command through platform specific command registries if applicable
+     * else, it sends the command to the server.
+     */
+    @Override
+    public void sendCommand(String command) {
+        if (MessageTranslator.isTooLong(command, this)) {
+            return;
+        }
+
+        if (CommandRegistry.STANDALONE_COMMAND_MANAGER) {
+            // try to handle the command within the standalone/viaproxy command manager
+            String[] args = command.split(" ");
+            if (args.length > 0) {
+                String root = args[0];
+
+                CommandRegistry registry = GeyserImpl.getInstance().commandRegistry();
+                if (registry.rootCommands().contains(root)) {
+                    registry.runCommand(this, command);
+                    // don't pass the command to the java server here
+                    // will pass it through later if the user lacks permission
+                    return;
+                }
+            }
+        }
+
+        this.sendCommandPacket(command);
     }
 
     @Override
